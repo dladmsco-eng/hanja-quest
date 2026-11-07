@@ -4,7 +4,7 @@
     "runtime": "nodejs22",
     "ignore": ["node_modules", ".git", "*.log", ".env.local"]
   },
-  "firestore": { "rules": "firestore.rules" },
+  "firestore": { "database": "(default)", "location": "asia-northeast3", "rules": "firestore.rules" },
   "emulators": {
     "auth": { "port": 9099 },
     "functions": { "port": 5001 },
