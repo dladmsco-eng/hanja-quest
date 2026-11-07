@@ -34,10 +34,8 @@
   <template id="player-template">
     <form class="panel stack player-form" autocomplete="off">
       <h2>내 캐릭터를 만나러 가요</h2>
-      <p>학년과 반을 선택하고 선생님에게 참가를 신청해요.</p>
+      <p id="player-room"></p>
       <div class="two-fields">
-        <div><label for="player-grade">학년</label><select id="player-grade" name="grade" required><option value="">고르기</option><option value="1">1학년</option><option value="2">2학년</option><option value="3">3학년</option><option value="4">4학년</option><option value="5">5학년</option><option value="6">6학년</option></select></div>
-        <div><label for="player-class">반</label><select id="player-class" name="classroom" required></select><small id="player-class-help"></small></div>
         <div><label for="player-number">번호</label><input id="player-number" name="number" inputmode="numeric" pattern="[0-9]{1,3}" maxlength="3" required></div>
         <div><label for="player-name">닉네임</label><input id="player-name" name="name" maxlength="30" required></div>
       </div>

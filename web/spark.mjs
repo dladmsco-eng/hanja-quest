@@ -21,7 +21,6 @@ export function createSparkBackend({ db, fs, uid, game, hanja }) {
   const rooms = collection(db, 'classrooms');
   const students = collection(db, 'students');
   const profileRef = doc(students, uid);
-  const staffRef = doc(db, 'staff', uid);
   const missionCache = new Map();
   const roomRef = id => {
     if (typeof id !== 'string' || !/^[a-f0-9]{32}$/.test(id)) fail('반을 선택해 주세요.');
@@ -31,7 +30,6 @@ export function createSparkBackend({ db, fs, uid, game, hanja }) {
   const cardsFor = owner => collection(db, 'curriculum', owner, 'cards');
   const roster = (id, generation) => query(students, where('roomId', '==', id), where('generation', '==', generation));
   const getData = async ref => (await getDocFromServer(ref)).data();
-  const teacher = async () => (await getData(staffRef))?.role === 'teacher';
   const profileView = (profile, room) => ({
     classId: profile.roomId, generation: profile.generation, name: profile.nickname,
     grade: room.grade, classroom: room.label, number: profile.number, status: profile.status
@@ -68,17 +66,22 @@ export function createSparkBackend({ db, fs, uid, game, hanja }) {
 
   const actions = {
     async 'auth.profile'() {
-      const [{ profile, room }, isTeacher] = await Promise.all([readStudent(), teacher()]);
-      return { teacher: isTeacher, student: validEnrollment(profile, room) ? profileView(profile, room) : null };
+      const { profile, room } = await readStudent();
+      return { teacher: true, student: validEnrollment(profile, room) ? profileView(profile, room) : null };
     },
 
     async 'classroom.list'() {
-      const condition = await teacher() ? where('owner', '==', uid) : where('resetting', '==', false);
-      const snapshot = await getDocsFromServer(query(rooms, condition, limit(200)));
+      const snapshot = await getDocsFromServer(query(rooms, where('owner', '==', uid), limit(200)));
       return snapshot.docs.map(ref => {
         const { grade, label, generation, resetting } = ref.data();
         return { id: ref.id, grade, label, generation, resetting };
       });
+    },
+
+    async 'classroom.find'({ classId }) {
+      const room = await getData(roomRef(classId));
+      if (!room || room.resetting) return null;
+      return { id: classId, grade: room.grade, label: room.label };
     },
 
     async 'classroom.register'({ grade, label }) {

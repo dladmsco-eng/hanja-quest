@@ -27,17 +27,23 @@ test('Spark login, approval, private gallery, sync, and class reset', async t =>
   const student = api(studentDb, studentUid);
   const other = api(otherDb, otherUid);
   await env.withSecurityRulesDisabled(async context => {
-    await fs.setDoc(fs.doc(context.firestore(), 'staff', teacherUid), { role: 'teacher' });
     await fs.setDoc(fs.doc(context.firestore(), 'settings', 'activity'), { submissionsEnabled: true });
   });
   assert.equal((await teacher('auth.profile')).teacher, true);
-  assert.deepEqual(await student('auth.profile'), { teacher: false, student: null });
-  await assertFails(fs.setDoc(fs.doc(studentDb, 'staff', studentUid), { role: 'teacher' }));
+  assert.deepEqual(await student('auth.profile'), { teacher: true, student: null });
   const room = await teacher('classroom.register', { grade: '2', label: '햇살반' });
-  assert.equal((await student('classroom.list'))[0].id, room.id);
+  const otherRoom = await other('classroom.register', { grade: '2', label: '햇살반' });
+  assert.notEqual(otherRoom.id, room.id);
+  assert.deepEqual((await teacher('classroom.list')).map(room => room.id), [room.id]);
+  assert.deepEqual((await other('classroom.list')).map(room => room.id), [otherRoom.id]);
+  assert.deepEqual(await student('classroom.list'), []);
+  assert.equal((await student('classroom.find', { classId: room.id })).id, room.id);
+  await assertFails(fs.getDocs(fs.query(fs.collection(studentDb, 'classrooms'), fs.limit(200))));
   await assertFails(fs.getDocs(fs.query(fs.collection(env.unauthenticatedContext().firestore(), 'classrooms'), fs.limit(200))));
   await assertFails(fs.getDocs(fs.query(fs.collection(context('wrong', { email_verified: true, firebase: { sign_in_provider: 'password' } }), 'classrooms'), fs.limit(200))));
   assert.equal((await student('student.enter', { classId: room.id, name: '별님', number: '07' })).status, 'pending');
+  await assertFails(fs.updateDoc(fs.doc(otherDb, 'classrooms', room.id), { resetting: true }));
+  await assertFails(fs.updateDoc(fs.doc(otherDb, 'students', studentUid), { status: 'approved' }));
   await assertFails(fs.updateDoc(fs.doc(studentDb, 'students', studentUid), { status: 'approved' }));
   await assertFails(fs.getDocs(fs.query(fs.collection(otherDb, 'students'), fs.where('roomId', '==', room.id), fs.limit(200))));
   await assert.rejects(student('classroom.avatars'), /반 승인/);
@@ -62,7 +68,6 @@ test('Spark login, approval, private gallery, sync, and class reset', async t =>
   const payload = { missionId: mission.missionId, submissionId: crypto.randomUUID(), answers: mission.cards.map(card => ({ questionId: card.id, optionId: card.correctOptionId })) };
   assert.deepEqual(await student('student.submit', payload), await student('student.submit', payload));
   assert.equal((await teacher('classroom.characters', { scope: room.id })).resultCount, 1);
-  const otherRoom = await teacher('classroom.register', { grade: '3', label: '달빛반' });
   await other('student.enter', { classId: otherRoom.id, name: '달님', number: '03' });
   const reset = await teacher('classroom.reset', { scope: room.id, confirmation: '2학년 · 햇살반', generation: 0 });
   assert.deepEqual(reset, { removed: 1, removedResults: 1 });

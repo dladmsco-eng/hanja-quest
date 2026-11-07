@@ -1,7 +1,7 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    // staff: owner-provisioned roles. students: private enrollment and progress.
+    // students: private enrollment and progress.
     // classrooms: room labels and reset generation. Each year's avatarOwners
     // reserves a random gallery key. avatars contains only public class fields.
     // results are separate, optional, and private. curriculum holds extra cards.
@@ -12,16 +12,12 @@ service cloud.firestore {
         && request.auth.token.firebase.sign_in_provider == 'google.com';
     }
     function self(uid) { return googleUser() && request.auth.uid == uid; }
-    function teacher() {
-      return googleUser()
-        && get(/databases/$(database)/documents/staff/$(request.auth.uid)).data.role == 'teacher';
-    }
     function room(id) { return get(/databases/$(database)/documents/classrooms/$(id)).data; }
     function studentPath(uid) { return /databases/$(database)/documents/students/$(uid); }
     function ownerPath(id, year, key) {
       return /databases/$(database)/documents/classrooms/$(id)/years/$(year)/avatarOwners/$(key);
     }
-    function owns(id) { return teacher() && room(id).owner == request.auth.uid; }
+    function owns(id) { return googleUser() && room(id).owner == request.auth.uid; }
     function current(id, generation) { return room(id).generation == generation; }
     function yearCurrent(id, year) { return year == string(room(id).generation); }
     function active(data) { return current(data.roomId, data.generation) && room(data.roomId).resetting == false; }
@@ -94,15 +90,14 @@ service cloud.firestore {
         && data.correctCount >= 0 && data.correctCount <= 20 && data.createdAt == request.time;
     }
 
-    match /staff/{uid} { allow get: if self(uid); }
     match /settings/activity { allow get: if googleUser(); }
     match /classrooms/{id} {
       allow get: if googleUser();
-      allow list: if googleUser() && request.query.limit <= 200;
-      allow create: if teacher() && id.matches('[a-f0-9]{32}') && validRoom(request.resource.data)
+      allow list: if googleUser() && request.query.limit <= 200 && resource.data.owner == request.auth.uid;
+      allow create: if googleUser() && id.matches('[a-f0-9]{32}') && validRoom(request.resource.data)
         && request.resource.data.owner == request.auth.uid && request.resource.data.generation == 0
         && request.resource.data.resetting == false;
-      allow update: if teacher() && resource.data.owner == request.auth.uid && validRoom(request.resource.data)
+      allow update: if googleUser() && resource.data.owner == request.auth.uid && validRoom(request.resource.data)
         && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['resetting','generation'])
         && ((resource.data.resetting == false && request.resource.data.resetting == true
           && request.resource.data.generation == resource.data.generation)
@@ -156,9 +151,9 @@ service cloud.firestore {
         && (room(resource.data.roomId).resetting == true || resource.data.status == 'pending');
     }
     match /curriculum/{owner}/cards/{id} {
-      allow get: if googleUser() && ((self(owner) && teacher()) || learnsFrom(owner));
-      allow list: if googleUser() && request.query.limit <= 181 && ((self(owner) && teacher()) || learnsFrom(owner));
-      allow create: if self(owner) && teacher() && validCard(request.resource.data)
+      allow get: if googleUser() && (self(owner) || learnsFrom(owner));
+      allow list: if googleUser() && request.query.limit <= 181 && (self(owner) || learnsFrom(owner));
+      allow create: if self(owner) && validCard(request.resource.data)
         && id.matches('extra-' + string(request.resource.data.grade) + '-[0-9a-f]{4,6}');
     }
   }

@@ -5,6 +5,8 @@
   const $ = (id) => document.getElementById(id);
   const classrooms = boot.classrooms || [];
   const backend = window.gameBackend;
+  const inviteId = new URL(location.href).searchParams.get('room');
+  let invitedRoom = null;
   let pendingProfile = null;
   let player = null;
   let treasure;
@@ -66,7 +68,7 @@
       card.append(node('h2', pendingProfile ? '선생님 승인을 기다려요' : 'Google 계정으로 시작해요'));
       card.append(node('p', pendingProfile
         ? pendingProfile.grade + '학년 · ' + pendingProfile.classroom + ' 참가 신청을 보냈어요.'
-        : 'Google 계정으로 접속하고, 선생님의 반 참가 승인을 받으면 놀이를 시작할 수 있어요.'));
+        : 'Google 계정으로 접속하고, 선생님이 보내 준 학급 링크로 참가를 신청해요.'));
       const next = node('button', pendingProfile ? '승인 확인' : 'Google 로그인', 'button primary');
       next.type = 'button';
       next.onclick = pendingProfile ? () => restoreAccount().catch(error => notify($('global-status'), textError(error), true)) : handleLogin;
@@ -74,23 +76,26 @@
       $('view-content').replaceChildren(card);
       return;
     }
+    if (!invitedRoom) {
+      const card = node('section', '', 'panel stack player-form');
+      card.append(node('h2', inviteId === null ? '학급 링크로 입장해요' : '학급 링크를 확인해 주세요'));
+      card.append(node('p', inviteId === null
+        ? '학생은 선생님이 보낸 링크를 열어 주세요. 선생님은 학급·한자 관리에서 반을 만들고 링크를 공유할 수 있어요.'
+        : '지금 이 링크로 입장할 수 없어요. 잠시 뒤 다시 열거나 선생님께 링크를 확인해 주세요.'));
+      $('view-content').replaceChildren(card);
+      return;
+    }
     $('view-content').replaceChildren($('player-template').content.cloneNode(true));
     const form = $('view-content').querySelector('form');
     const submit = form.querySelector('button');
-    function showRooms() {
-      const grade = form.elements.grade.value;
-      const count = fillClassrooms(form.elements.classroom, grade, true);
-      $('player-class-help').textContent = grade && !count ? '아직 등록된 반이 없어요. 선생님께 반 등록을 부탁해 주세요.' : '';
-    }
-    form.elements.grade.onchange = showRooms;
-    showRooms();
+    const room = invitedRoom;
+    $('player-room').textContent = room.grade + '학년 · ' + room.label + '에 참가를 신청해요.';
     form.onsubmit = async event => {
       event.preventDefault();
       const identity = Object.fromEntries(new FormData(form));
       identity.name = identity.name.trim().normalize('NFC');
-      const room = classrooms.find(item => item.id === identity.classroom && item.grade === identity.grade);
-      if (!identity.name || /[\u0000-\u001f\u007f]/.test(identity.name) || !room || !Number(identity.number)) {
-        notify(form.querySelector('.notice'), '반과 닉네임을 적고, 번호는 1 이상으로 입력해 주세요.', true);
+      if (!identity.name || /[\u0000-\u001f\u007f]/.test(identity.name) || !Number(identity.number)) {
+        notify(form.querySelector('.notice'), '닉네임을 적고, 번호는 1 이상으로 입력해 주세요.', true);
         return;
       }
       submit.disabled = true;
@@ -109,21 +114,6 @@
 
   function freshTreasure() {
     return { coins: 0, badges: [], owned: ['purple'], learned: [], ...boot.characterDefaults };
-  }
-
-  function fillClassrooms(select, grade, useId, selected = '') {
-    const rooms = classrooms.filter(room => room.grade === grade);
-    const placeholder = node('option', grade ? '반 선택' : '학년을 먼저 선택해 주세요');
-    placeholder.value = '';
-    select.replaceChildren(placeholder);
-    for (const room of rooms) {
-      const option = node('option', room.label);
-      option.value = useId ? room.id : room.label;
-      option.defaultSelected = option.value === selected;
-      select.append(option);
-    }
-    if (selected) select.value = selected;
-    return rooms.length;
   }
 
   function openCharacterConnection(profile) {
@@ -154,7 +144,8 @@
     if (!backend.current()) { setSession(false); showHome(); return; }
     const profile = await rpc('auth.profile');
     setSession(profile.teacher);
-    await refreshClassrooms();
+    invitedRoom = !profile.student && /^[a-f0-9]{32}$/.test(inviteId || '')
+      ? await rpc('classroom.find', { classId: inviteId }) : null;
     await openProfile(profile.student);
     showHome();
   }
@@ -187,7 +178,7 @@
           clearTimeout(connection.timer);
           leaveCharacter();
           notify($('global-status'), '반이 초기화됐어요. 다시 입장해 주세요.');
-          await refreshClassrooms();
+          await restoreAccount();
         }
         return false;
       }
@@ -281,6 +272,7 @@
       await backend.logout();
       if (connection) sessionStorage.removeItem(connection.cacheKey);
       pendingProfile = null;
+      invitedRoom = null;
       studentDrafts.clear();
       syncUnloadWarning();
       classrooms.length = 0;
@@ -300,7 +292,7 @@
         const [rows, rooms] = await Promise.all([rpc('teacher.cards'), rpc('classroom.list')]);
         if (viewVersion !== requestedView) return;
         classrooms.splice(0, classrooms.length, ...rooms);
-        mount('manage', '학급·한자 관리', '학생이 고를 반을 등록하고 학년별 한자를 추가할 수 있어요.', 'teacher');
+        mount('manage', '학급·한자 관리', '반을 만들고 학생에게 학급 링크를 보내세요. 학년별 한자도 추가할 수 있어요.', 'teacher');
         setupCardManagement(rows);
         setupClassroomManagement();
         setupClassroomCleanup();
@@ -1023,7 +1015,32 @@
     const status = form.querySelector('.notice');
     const submit = form.querySelector('button');
     const render = () => {
-      $('registered-classrooms').replaceChildren(...classrooms.map(room => node('li', room.grade + '학년 · ' + room.label)));
+      $('registered-classrooms').replaceChildren(...classrooms.map(room => {
+        const row = node('li', room.grade + '학년 · ' + room.label + ' ');
+        const copy = node('button', '학급 링크 복사', 'button secondary');
+        copy.type = 'button';
+        copy.onclick = async () => {
+          const link = new URL(location.pathname, location.origin);
+          link.searchParams.set('room', room.id);
+          try {
+            await navigator.clipboard.writeText(link.href);
+            notify(status, '학급 링크를 복사했어요. 학생들에게 보내 주세요.');
+          } catch (_) {
+            let address = row.querySelector('input');
+            if (!address) {
+              address = node('input');
+              address.readOnly = true;
+              address.setAttribute('aria-label', '학급 링크 주소');
+              row.append(address);
+            }
+            address.value = link.href;
+            address.select();
+            notify(status, '선택된 학급 링크를 복사해 주세요.');
+          }
+        };
+        row.append(copy);
+        return row;
+      }));
     };
     render();
     form.onsubmit = async event => {
