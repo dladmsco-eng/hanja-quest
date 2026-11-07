@@ -1,11 +1,165 @@
 rules_version = '2';
-
 service cloud.firestore {
   match /databases/{database}/documents {
-    // Classrooms, membership, avatars, and assessment results are accessed
-    // through authenticated Cloud Functions using the Firebase Admin SDK.
-    match /{document=**} {
-      allow read, write: if false;
+    // staff: owner-provisioned roles. students: private enrollment and progress.
+    // classrooms: room labels and reset generation. Each year's avatarOwners
+    // reserves a random gallery key. avatars contains only public class fields.
+    // results are separate, optional, and private. curriculum holds extra cards.
+    match /{document=**} { allow read, write: if false; }
+
+    function googleUser() {
+      return request.auth != null && request.auth.token.email_verified == true
+        && request.auth.token.firebase.sign_in_provider == 'google.com';
+    }
+    function self(uid) { return googleUser() && request.auth.uid == uid; }
+    function teacher() {
+      return googleUser()
+        && get(/databases/$(database)/documents/staff/$(request.auth.uid)).data.role == 'teacher';
+    }
+    function room(id) { return get(/databases/$(database)/documents/classrooms/$(id)).data; }
+    function studentPath(uid) { return /databases/$(database)/documents/students/$(uid); }
+    function ownerPath(id, year, key) {
+      return /databases/$(database)/documents/classrooms/$(id)/years/$(year)/avatarOwners/$(key);
+    }
+    function owns(id) { return teacher() && room(id).owner == request.auth.uid; }
+    function current(id, generation) { return room(id).generation == generation; }
+    function yearCurrent(id, year) { return year == string(room(id).generation); }
+    function active(data) { return current(data.roomId, data.generation) && room(data.roomId).resetting == false; }
+    function member(id, year) {
+      let profile = get(studentPath(request.auth.uid)).data;
+      return profile.roomId == id && profile.status == 'approved'
+        && year == string(profile.generation) && active(profile);
+    }
+    function exact(data, keys) { return data.keys().hasAll(keys) && data.keys().hasOnly(keys); }
+    function grade(value) { return value is string && value.matches('[1-6]'); }
+    function label(value, max) { return value is string && value.size() > 0 && value.size() <= max; }
+    function uuid(value) {
+      return value is string && value.matches('[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}');
+    }
+    function validRoom(data) {
+      return exact(data, ['owner','grade','label','generation','resetting']) && grade(data.grade)
+        && label(data.label, 60) && data.generation is int && data.generation >= 0 && data.resetting is bool;
+    }
+    function validStudent(data) {
+      return exact(data, ['roomId','generation','nickname','number','status','avatarId','createdAt','state','devices'])
+        && data.roomId is string && data.roomId.matches('[a-f0-9]{32}') && data.generation is int && data.generation >= 0
+        && label(data.nickname, 30) && data.number is string && data.number.matches('[0-9]{1,3}') && !data.number.matches('0+')
+        && data.status in ['pending','approved'] && uuid(data.avatarId) && data.createdAt is timestamp
+        && data.devices is map && data.devices.size() <= 300 && validState(data.state);
+    }
+    function validBadges(badges) {
+      return badges is list && badges.size() <= 3 && badges.hasOnly(['놀이 완주 배지','한자 달인 배지','한자 탐험 완주 배지']);
+    }
+    function validOutfit(data) {
+      return data.theme in ['purple','mint','pink','gold'] && data.hat in ['none','crown','cap','cat']
+        && data.scarf in ['purple','mint','pink'] && data.hair in ['brown','plum','short','curly']
+        && data.skin in ['peach','tan','deep'] && data.top in ['lavender','striped','jacket']
+        && data.bottom in ['navy','green','shorts'] && data.glasses in ['none','round','star']
+        && data.shoes in ['white','red','mint'];
+    }
+    function outfitFields() { return ['theme','hat','scarf','hair','skin','top','bottom','glasses','shoes']; }
+    function validState(data) {
+      return exact(data, outfitFields().concat(['coins','badges','learned','owned'])) && validOutfit(data)
+        && validBadges(data.badges) && data.coins is int && data.coins >= 0 && data.coins <= 1000000
+        && data.learned is list && data.learned.size() <= 1500 && data.owned is list && data.owned.size() <= 22
+        && data.owned.hasOnly(['purple','mint','pink','gold','hat:crown','hat:cap','hat:cat','scarf:mint','scarf:pink',
+          'hair:plum','hair:short','hair:curly','skin:tan','skin:deep','top:striped','top:jacket','bottom:green',
+          'bottom:shorts','glasses:round','glasses:star','shoes:red','shoes:mint']);
+    }
+    function validAvatar(data, profile) {
+      return exact(data, ['nickname','outfit','badges']) && data.nickname == profile.nickname
+        && data.outfit is map && exact(data.outfit, outfitFields()) && validOutfit(data.outfit) && validBadges(data.badges);
+    }
+    function avatarWriter(id, year, key, data) {
+      let uid = getAfter(ownerPath(id, year, key)).data.uid;
+      let profile = getAfter(studentPath(uid)).data;
+      return (self(uid) || (owns(id) && get(studentPath(uid)).data.status == 'pending'))
+        && profile.roomId == id && string(profile.generation) == year
+        && profile.avatarId == key && profile.status == 'approved' && active(profile) && validAvatar(data, profile);
+    }
+    function validCard(data) {
+      return exact(data, ['grade','character','meaning','reading','example']) && data.grade is int
+        && data.grade >= 1 && data.grade <= 6 && label(data.character, 2) && label(data.meaning, 30)
+        && data.reading is string && data.reading.matches('[가-힣]{1,4}') && data.example is string && data.example.size() <= 100;
+    }
+    function learnsFrom(owner) {
+      let profile = get(studentPath(request.auth.uid)).data;
+      return profile.status == 'approved' && active(profile) && room(profile.roomId).owner == owner;
+    }
+    function validResult(data, id) {
+      return exact(data, ['studentId','missionId','submissionId','fingerprint','grade','correctCount','questionCount','createdAt'])
+        && self(data.studentId) && uuid(data.missionId) && id == data.studentId + '_' + data.missionId
+        && data.fingerprint is string && data.fingerprint.matches('[a-f0-9]{64}')
+        && uuid(data.submissionId) && grade(data.grade) && data.questionCount == 20 && data.correctCount is int
+        && data.correctCount >= 0 && data.correctCount <= 20 && data.createdAt == request.time;
+    }
+
+    match /staff/{uid} { allow get: if self(uid); }
+    match /settings/activity { allow get: if googleUser(); }
+    match /classrooms/{id} {
+      allow get: if googleUser();
+      allow list: if googleUser() && request.query.limit <= 200;
+      allow create: if teacher() && id.matches('[a-f0-9]{32}') && validRoom(request.resource.data)
+        && request.resource.data.owner == request.auth.uid && request.resource.data.generation == 0
+        && request.resource.data.resetting == false;
+      allow update: if teacher() && resource.data.owner == request.auth.uid && validRoom(request.resource.data)
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['resetting','generation'])
+        && ((resource.data.resetting == false && request.resource.data.resetting == true
+          && request.resource.data.generation == resource.data.generation)
+          || (resource.data.resetting == true && request.resource.data.resetting == false
+          && request.resource.data.generation == resource.data.generation + 1));
+
+      match /years/{year}/avatarOwners/{key} {
+        allow list: if owns(id) && yearCurrent(id, year) && request.query.limit <= 200;
+        allow create: if googleUser() && uuid(key) && exact(request.resource.data, ['uid'])
+          && self(request.resource.data.uid) && !exists(studentPath(request.auth.uid))
+          && getAfter(studentPath(request.auth.uid)).data.avatarId == key
+          && getAfter(studentPath(request.auth.uid)).data.roomId == id && yearCurrent(id, year)
+          && room(id).resetting == false;
+        allow delete: if owns(id) && yearCurrent(id, year) && (room(id).resetting == true
+          || (get(studentPath(resource.data.uid)).data.status == 'pending'
+          && get(studentPath(resource.data.uid)).data.roomId == id
+          && get(studentPath(resource.data.uid)).data.avatarId == key
+          && !existsAfter(studentPath(resource.data.uid))));
+      }
+      match /years/{year}/avatars/{key} {
+        allow get: if owns(id) || (googleUser() && member(id, year));
+        allow list: if request.query.limit <= 200 && (owns(id) || (googleUser() && member(id, year)));
+        allow create, update: if googleUser() && avatarWriter(id, year, key, request.resource.data);
+        allow delete: if owns(id) && yearCurrent(id, year) && room(id).resetting == true;
+      }
+      match /years/{year}/results/{idKey} {
+        allow get: if owns(id) || (googleUser() && member(id, year)
+          && idKey.matches(request.auth.uid + '_[0-9a-f-]{36}'));
+        allow list: if owns(id);
+        allow create: if googleUser() && member(id, year) && validResult(request.resource.data, idKey)
+          && get(/databases/$(database)/documents/settings/activity).data.submissionsEnabled == true;
+        allow delete: if owns(id) && yearCurrent(id, year) && room(id).resetting == true;
+      }
+    }
+    match /students/{uid} {
+      allow get: if self(uid) || owns(resource.data.roomId);
+      allow list: if request.query.limit <= 200 && owns(resource.data.roomId);
+      allow create: if self(uid) && validStudent(request.resource.data) && active(request.resource.data)
+        && request.resource.data.status == 'pending' && request.resource.data.createdAt == request.time
+        && request.resource.data.state.coins == 0 && request.resource.data.state.badges.size() == 0
+        && request.resource.data.state.learned.size() == 0 && request.resource.data.state.owned == ['purple']
+        && request.resource.data.devices.size() == 0
+        && !exists(ownerPath(request.resource.data.roomId, string(request.resource.data.generation), request.resource.data.avatarId))
+        && getAfter(ownerPath(request.resource.data.roomId, string(request.resource.data.generation), request.resource.data.avatarId)).data.uid == uid;
+      allow update: if validStudent(request.resource.data) && active(resource.data) && (
+        (self(uid) && resource.data.status == 'approved'
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['state','devices']))
+        || (owns(resource.data.roomId) && resource.data.status == 'pending' && request.resource.data.status == 'approved'
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status'])));
+      allow delete: if owns(resource.data.roomId) && current(resource.data.roomId, resource.data.generation)
+        && (room(resource.data.roomId).resetting == true || resource.data.status == 'pending');
+    }
+    match /curriculum/{owner}/cards/{id} {
+      allow get: if googleUser() && ((self(owner) && teacher()) || learnsFrom(owner));
+      allow list: if googleUser() && request.query.limit <= 181 && ((self(owner) && teacher()) || learnsFrom(owner));
+      allow create: if self(owner) && teacher() && validCard(request.resource.data)
+        && id.matches('extra-' + string(request.resource.data.grade) + '-[0-9a-f]{4,6}');
     }
   }
 }

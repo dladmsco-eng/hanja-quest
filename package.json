@@ -1,0 +1,9 @@
+{
+  "name": "hanja-quest",
+  "private": true,
+  "overrides": { "@grpc/grpc-js": "1.14.7" },
+  "devDependencies": {
+    "@firebase/rules-unit-testing": "6.0.0",
+    "firebase": "13.2.0"
+  }
+}

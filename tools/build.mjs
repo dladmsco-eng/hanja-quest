@@ -3,6 +3,12 @@ import { CHARACTER_DEFAULTS_, CHARACTER_ITEMS_ } from '../functions/game.cjs';
 
 const read = file => readFile(new URL('../web/' + file, import.meta.url), 'utf8');
 const write = (file, content) => writeFile(new URL('../dist/' + file, import.meta.url), content);
+const moduleSource = async name => {
+  const source = await readFile(new URL('../functions/' + name + '.cjs', import.meta.url), 'utf8');
+  const browserModule = source.replace(/^module\.exports = \{ (.+) \};$/m, 'export { $1 };');
+  if (source === browserModule) throw new Error('Missing module exports for ' + name);
+  return browserModule;
+};
 const preview = process.argv.includes('--preview');
 const incoming = JSON.parse(process.env.FIREBASE_WEB_CONFIG || '{}');
 const firebase = Object.fromEntries(['apiKey', 'authDomain', 'projectId', 'appId'].filter(key => typeof incoming[key] === 'string').map(key => [key, incoming[key]]));
@@ -18,7 +24,7 @@ const boot = { hanja: { version: 'v2', grades: [1, 2, 3, 4, 5, 6] }, classrooms:
 const config = configured ? firebase : null;
 const [template, styles, client, firebaseClient] = await Promise.all(['Index.html', 'Styles.html', 'Client.html', 'firebase-client.js'].map(read));
 const scriptPolicy = "script-src 'self' https://www.gstatic.com https://apis.google.com";
-const destinations = configured ? ' https://' + firebase.authDomain + ' https://asia-northeast3-' + firebase.projectId + '.cloudfunctions.net' : '';
+const destinations = configured ? ' https://' + firebase.authDomain + ' https://firestore.googleapis.com' : '';
 const csp = [
   "default-src 'self'", scriptPolicy, "style-src 'self'", "img-src 'self' data:", "object-src 'none'",
   "base-uri 'none'", "form-action 'self'", "connect-src 'self' https://identitytoolkit.googleapis.com https://securetoken.googleapis.com https://www.googleapis.com" + destinations,
@@ -34,6 +40,9 @@ await Promise.all([
   write('styles.css', styles.replace(/^<style>|<\/style>\s*$/g, '')),
   write('app.js', client.replace(/^<script>|<\/script>\s*$/g, '')),
   write('firebase-client.js', firebaseClient),
+  write('spark.js', await read('spark.mjs')),
+  write('game.js', await moduleSource('game')),
+  write('hanja.js', await moduleSource('hanja')),
   write('firebase-config.json', JSON.stringify(config)),
   write('.nojekyll', '')
 ]);

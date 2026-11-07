@@ -42,6 +42,8 @@
   const rpc = (action, payload = {}) => backend.call(action, payload);
 
   function textError(error) {
+    if (error?.code === 'permission-denied') return '이 작업에 필요한 권한이 없어요. 담당 선생님께 확인해 주세요.';
+    if (error?.code === 'unavailable') return '연결이 끊겼어요. 잠시 후 다시 시도해 주세요.';
     return error && error.message ? String(error.message).replace(/^Exception:\s*/, '') : '연결 상태를 확인하고 다시 시도해 주세요.';
   }
 
@@ -1084,7 +1086,7 @@
               action.onclick = async () => {
                 for (const control of row.querySelectorAll('button')) control.disabled = true;
                 try {
-                  await rpc('classroom.membership', { studentId: student.id, status: state });
+                  await rpc('classroom.membership', { scope: selected, studentId: student.id, status: state });
                   if (row.isConnected) await load('참가 신청을 처리했습니다.');
                 } catch (error) {
                   if (row.isConnected) { notify(status, textError(error), true); for (const control of row.querySelectorAll('button')) control.disabled = false; }
