@@ -1,0 +1,188 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <base target="_top">
+  <meta charset="utf-8">
+  <?!= include_('Styles') ?>
+</head>
+<body>
+  <a class="skip" href="#main" target="_self">본문으로 건너뛰기</a>
+  <header class="wrap topbar">
+    <button id="brand" type="button" class="brand" aria-label="한자 탐험대 처음으로">
+      <svg viewBox="0 0 40 40" aria-hidden="true"><rect width="40" height="40" rx="11" fill="currentColor"/><path d="M20 14c-3-2-6-2-10-1v14c4-1 7-1 10 1 3-2 6-2 10-1V13c-4-1-7-1-10 1zm0 0v14" fill="none" stroke="#fff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      <span>한자 탐험대</span>
+    </button>
+    <div class="header-actions"><button type="button" id="game-home" class="button secondary">홈으로</button><button type="button" id="change-player" class="button secondary" hidden>Google 로그아웃</button><button type="button" id="manage-cards" class="button secondary" hidden>학급·한자 관리</button><button type="button" id="auth-button" class="button secondary">Google 로그인</button></div>
+  </header>
+  <main id="main" class="wrap" tabindex="-1">
+    <p id="cloud-status" class="notice" role="status" hidden></p>
+    <p id="global-status" class="notice" role="status" aria-atomic="true"></p>
+    <section id="tool-view">
+      <button type="button" id="back" class="button secondary" hidden>← 한자 탐험으로</button>
+      <div class="tool-heading">
+        <span id="view-tag" class="tag"></span>
+        <h1 id="view-title" tabindex="-1"></h1>
+        <p id="view-description"></p>
+        <button type="button" id="game-start" class="button primary" hidden>게임 시작 <span aria-hidden="true">▶</span></button>
+        <div class="quest-art" aria-hidden="true"></div>
+      </div>
+      <div id="view-content"></div>
+    </section>
+  </main>
+  <footer class="wrap footer"><span>한자 탐험대</span><span>초등 1~6학년 한자 연습</span></footer>
+
+  <template id="player-template">
+    <form class="panel stack player-form" autocomplete="off">
+      <h2>내 캐릭터를 만나러 가요</h2>
+      <p>학년과 반을 선택하고 선생님에게 참가를 신청해요.</p>
+      <div class="two-fields">
+        <div><label for="player-grade">학년</label><select id="player-grade" name="grade" required><option value="">고르기</option><option value="1">1학년</option><option value="2">2학년</option><option value="3">3학년</option><option value="4">4학년</option><option value="5">5학년</option><option value="6">6학년</option></select></div>
+        <div><label for="player-class">반</label><select id="player-class" name="classroom" required></select><small id="player-class-help"></small></div>
+        <div><label for="player-number">번호</label><input id="player-number" name="number" inputmode="numeric" pattern="[0-9]{1,3}" maxlength="3" required></div>
+        <div><label for="player-name">닉네임</label><input id="player-name" name="name" maxlength="30" required></div>
+      </div>
+      <small>구글 계정과 연결해 학년·반·번호·닉네임, 아바타와 놀이 기록을 저장해요. 같은 반 친구에게는 닉네임, 아바타, 배지만 보여요. 닉네임에는 실명이나 연락처를 적지 마세요. 기록을 지우고 싶으면 담당 선생님에게 말해 주세요.</small>
+      <button class="button primary" type="submit">반 참가 신청</button>
+      <p class="notice" role="status"></p>
+    </form>
+  </template>
+
+  <template id="human-avatar-template">
+    <svg class="character-human" viewBox="0 0 200 215" aria-hidden="true">
+      <circle cx="100" cy="97" r="76" fill="#f6e7ff" opacity=".68"/>
+      <path d="m23 58 3 7 8 3-8 3-3 8-3-8-8-3 8-3zm154 47 3 6 7 3-7 3-3 7-3-7-7-3 7-3z" fill="#ffe783"/>
+      <circle cx="34" cy="117" r="3" fill="#ffb0d5"/><circle cx="165" cy="50" r="4" fill="#aff6da"/>
+      <ellipse cx="100" cy="200" rx="55" ry="7" fill="#442e6e" opacity=".22"/>
+      <g stroke="#4b3157" stroke-width="2.6" stroke-linejoin="round">
+        <path class="avatar-skin" d="M79 161h16v26H79zm26 0h16v26h-16z"/>
+        <path class="avatar-bottom" d="M77 150h46l1 32H104l-4-18-4 18H76z"/>
+        <path class="avatar-shoes" d="M79 182q8 3 16 0l2 12q-15 5-28 0-2-8 10-12zm42 0q-8 3-16 0l-2 12q15 5 28 0 2-8-10-12z"/>
+        <path class="avatar-skin" d="M72 124q-17 10-16 26 1 7 8 7l14-20m50-13q17 10 16 26-1 7-8 7l-14-20"/>
+        <path class="avatar-top" d="M80 113h40q15 2 22 15l-13 13-6-6v24q-23 6-46 0v-24l-6 6-13-13q7-13 22-15z"/>
+        <path class="avatar-stripes" d="M79 144h42m-42 8h42" stroke="#fff5f7" stroke-width="4"/>
+        <path class="avatar-jacket" d="M100 119v40m12-18 2 4 5 1-4 3 1 5-4-3-4 3 1-5-4-3 5-1z" fill="#ffe786"/>
+        <path class="avatar-skin" d="M55 80q-13-8-15 4-1 11 13 14 9 23 47 25 38-2 47-25 14-3 13-14-2-12-15-4l-5-27-40-17-40 17z"/>
+        <path class="avatar-hair" d="M53 85Q40 55 60 37q17-19 49-14 39 0 44 31 3 16-6 32l-9-19q-17 6-31-7-13 13-36 9l-11 17z"/>
+        <path class="avatar-curls avatar-hair" d="M51 74q-9-13 4-22-3-15 12-19 5-14 20-10 12-12 25-3 14-5 22 7 17 3 16 18 12 12 4 30l-12 11-10-15-14 5-17-7-15 7-13-5-13 14z"/>
+        <path d="M73 51q12-11 29-13" fill="none" stroke="#fff1da" opacity=".38" stroke-linecap="round"/>
+        <g stroke="none">
+          <ellipse cx="78" cy="87" rx="7" ry="9" fill="#362342"/><ellipse cx="122" cy="87" rx="7" ry="9" fill="#362342"/>
+          <circle cx="76" cy="84" r="2.7" fill="white"/><circle cx="120" cy="84" r="2.7" fill="white"/>
+          <ellipse cx="64" cy="101" rx="9" ry="4" fill="#f789a8" opacity=".7"/><ellipse cx="136" cy="101" rx="9" ry="4" fill="#f789a8" opacity=".7"/>
+        </g>
+        <path d="M94 101q6 8 12 0" fill="none" stroke-linecap="round"/>
+        <path class="avatar-scarf" d="M77 116q23 8 46 0l1 8q-20 9-45 1-5-3-2-9z"/>
+        <path class="avatar-scarf" d="M117 121q6-5 11 0 4 5-3 9l4 18-8 4-4-18-5 11-7-3 6-15q0-4 6-6z"/>
+        <path d="m121 148 7-3" fill="none" stroke="#fff4fe" opacity=".8" stroke-width="2"/>
+        <g class="avatar-round" fill="none"><circle cx="78" cy="88" r="13"/><circle cx="122" cy="88" r="13"/><path d="M91 88h18"/></g>
+        <path class="avatar-star" d="m78 74 5 9 10 2-8 7 2 10-9-5-9 5 2-10-8-7 10-2zm44 0 5 9 10 2-8 7 2 10-9-5-9 5 2-10-8-7 10-2z" fill="#ffe48d" fill-opacity=".65"/>
+        <path class="avatar-crown" d="m74 43-3-22 15 8 14-16 14 16 15-8-3 22z" fill="#ffd669"/>
+        <path class="avatar-cap" d="M58 53q1-33 41-33 37 0 45 34l-29 2q-28-6-57-3zm57 3 28-3q18 3 17 10-13 8-45-7z" fill="#68a9f6"/>
+        <path class="avatar-cat" d="M57 56l5-34 27 11q11-3 22 0l27-11 5 34q-44-10-86 0z" fill="#be92ec"/>
+      </g>
+    </svg>
+  </template>
+
+  <template id="hanja-quest-template">
+    <section class="panel hanja-panel stack" aria-label="한자 탐험">
+      <p id="hanja-progress"></p>
+      <h2 id="hanja-stage" tabindex="-1"></h2>
+      <div id="hanja-content" class="stack"></div>
+      <p id="hanja-feedback" class="notice" role="status" aria-atomic="true"></p>
+      <div id="hanja-actions" class="actions"></div>
+    </section>
+    <div data-student-slot class="hanja-submission" hidden></div>
+  </template>
+  <template id="island-art-template">
+    <svg class="island-art" viewBox="0 0 100 76" aria-hidden="true">
+      <path d="m12 47 13 16 24 10 25-10 14-16" fill="var(--island-edge)"/>
+      <ellipse cx="50" cy="46" rx="39" ry="13" fill="var(--island-grass)"/>
+      <path d="m18 25 3 6 7 2-7 3-3 6-3-6-6-3 6-2zm65-8 3 6 7 3-7 2-3 6-3-6-7-2 7-3z" fill="#fff" opacity=".9"/>
+      <rect x="31" y="8" width="38" height="41" rx="9" fill="#fffdf3" stroke="var(--island-edge)" stroke-width="2.5"/>
+      <text x="50" y="37" text-anchor="middle" font-size="25" font-weight="850" fill="#362365"></text>
+    </svg>
+  </template>
+
+  <template id="student-submission-template">
+    <div class="tool-grid">
+      <form class="panel stack" aria-label="활동 결과 제출">
+        <h2>학습 결과 제출</h2>
+        <p id="submission-summary"></p>
+        <div class="actions">
+          <button class="button primary" id="student-send" type="submit">결과 제출</button>
+          <button class="button secondary" id="student-new" type="button" hidden>새 제출 시작</button>
+        </div>
+        <p class="notice" role="status" aria-atomic="true"></p>
+      </form>
+      <aside class="panel privacy" aria-labelledby="privacy-title">
+        <h2 id="privacy-title">개인정보 안내</h2>
+        <dl>
+          <dt>처리 목적</dt><dd id="privacy-purpose"></dd>
+          <dt>수집 항목</dt><dd>계정 식별자, 반 식별자, 학습 학년, 맞힌 문항 수, 제출 시간</dd>
+          <dt>운영 책임자</dt><dd id="privacy-controller"></dd>
+          <dt>보유 및 삭제</dt><dd id="privacy-retention"></dd>
+          <dt>열람·정정·삭제 문의</dt><dd id="privacy-contact"></dd>
+        </dl>
+        <p>활동을 제출할 때 저장해요. 궁금한 점이 있으면 선생님에게 물어보세요.</p>
+      </aside>
+    </div>
+  </template>
+
+  <template id="manage-template">
+    <form class="panel stack" id="classroom-form">
+      <h2>반 미리 등록</h2>
+      <div class="two-fields">
+        <div><label for="classroom-grade">학년</label><select id="classroom-grade" name="grade" required><option value="1">1학년</option><option value="2">2학년</option><option value="3">3학년</option><option value="4">4학년</option><option value="5">5학년</option><option value="6">6학년</option></select></div>
+        <div><label for="classroom-label">반 이름</label><input id="classroom-label" name="label" required maxlength="60" placeholder="예: 1 또는 햇살반"></div>
+      </div>
+      <button type="submit" class="button primary">반 등록</button>
+      <p class="notice" role="status"></p>
+      <ul id="registered-classrooms" class="result-list"></ul>
+    </form>
+    <section class="panel stack class-cleanup">
+      <h2>학생 캐릭터 기록 정리</h2>
+      <label for="cleanup-scope">확인할 반</label>
+      <select id="cleanup-scope"></select>
+      <p id="cleanup-status" class="notice" role="status"></p>
+      <ul id="cleanup-students" class="result-list"></ul>
+      <form id="cleanup-form" class="stack" hidden>
+        <p>선택한 반의 참가 기록, 캐릭터, 포인트, 옷, 배지, 제출한 학습 결과를 모두 삭제합니다.</p>
+        <label for="cleanup-confirmation" id="cleanup-confirmation-label">반 이름을 입력해 확인</label>
+        <input id="cleanup-confirmation" name="confirmation" required autocomplete="off">
+        <button type="submit" class="button danger">반 학생 기록 삭제</button>
+      </form>
+    </section>
+    <div class="tool-grid">
+      <form class="panel stack" id="card-form">
+        <h2>한자 한 글자 추가</h2>
+        <label for="card-grade">학습 학년</label>
+        <select id="card-grade" name="grade" required>
+          <option value="1">1학년</option><option value="2">2학년</option><option value="3">3학년</option>
+          <option value="4">4학년</option><option value="5">5학년</option><option value="6">6학년</option>
+        </select>
+        <div class="two-fields">
+          <div><label for="card-character">한자</label><input id="card-character" name="character" required maxlength="2" placeholder="예: 猫"></div>
+          <div><label for="card-reading">음</label><input id="card-reading" name="reading" required maxlength="4" placeholder="예: 묘"></div>
+        </div>
+        <label for="card-meaning">뜻</label><input id="card-meaning" name="meaning" required maxlength="30" placeholder="예: 고양이">
+        <label for="card-example">예문 (선택)</label><input id="card-example" name="example" maxlength="100">
+        <button type="submit" class="button primary">학년 목록에 추가</button>
+        <p class="notice" role="status"></p>
+      </form>
+      <section class="panel" aria-labelledby="added-title">
+        <h2 id="added-title">학년별 전체 한자</h2>
+        <label for="catalog-grade">목록에서 볼 학년</label>
+        <select id="catalog-grade">
+          <option value="1">1학년</option><option value="2">2학년</option><option value="3">3학년</option>
+          <option value="4">4학년</option><option value="5">5학년</option><option value="6">6학년</option>
+        </select>
+        <p id="catalog-count" role="status"></p>
+        <ul class="result-list" id="added-cards"></ul>
+      </section>
+    </div>
+  </template>
+
+  <script id="boot-data" type="application/json"><?!= boot ?></script>
+  <?!= include_('Client') ?>
+</body>
+</html>

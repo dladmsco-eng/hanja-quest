@@ -1,0 +1,1137 @@
+<script>
+(() => {
+  'use strict';
+  const boot = JSON.parse(document.getElementById('boot-data').textContent);
+  const $ = (id) => document.getElementById(id);
+  const classrooms = boot.classrooms || [];
+  const backend = window.gameBackend;
+  let pendingProfile = null;
+  let player = null;
+  let treasure;
+  let cloud;
+  const tagNames = {teacher: '교사전용', student: '학생활동'};
+  let session = '';
+  let cleanup = () => {};
+  let viewVersion = 0;
+  const studentDrafts = new Map();
+  const studentViews = new Map();
+
+  function node(tag, content, className) {
+    const element = document.createElement(tag);
+    if (content) element.textContent = content;
+    if (className) element.className = className;
+    return element;
+  }
+
+  function notify(target, text, error = false) {
+    target.dataset.error = String(error);
+    target.textContent = text;
+  }
+
+  function warnBeforeLeaving(event) {
+    event.preventDefault();
+    event.returnValue = true;
+  }
+
+  function syncUnloadWarning() {
+    const pending = Array.from(studentDrafts.values()).some(draft => draft.payload);
+    if (pending) window.addEventListener('beforeunload', warnBeforeLeaving);
+    else window.removeEventListener('beforeunload', warnBeforeLeaving);
+  }
+
+  const rpc = (action, payload = {}) => backend.call(action, payload);
+
+  function textError(error) {
+    return error && error.message ? String(error.message).replace(/^Exception:\s*/, '') : '연결 상태를 확인하고 다시 시도해 주세요.';
+  }
+
+  function setSession(teacher) {
+    session = teacher;
+    $('auth-button').textContent = backend.current() ? 'Google 로그아웃' : 'Google 로그인';
+    $('manage-cards').hidden = !teacher;
+  }
+
+  function showHome(focus = true) {
+    mount('hanja-quest', '한자 탐험대', '한자 카드를 열고, 오늘의 놀이를 뽑아 보물 상자를 열어요!', 'student', focus);
+    $('change-player').hidden = true;
+    if (player) {
+      setupHanja();
+      return;
+    }
+    $('tool-view').dataset.questStage = 'intro';
+    if (!backend.current() || pendingProfile) {
+      const card = node('section', '', 'panel stack player-form');
+      card.append(node('h2', pendingProfile ? '선생님 승인을 기다려요' : 'Google 계정으로 시작해요'));
+      card.append(node('p', pendingProfile
+        ? pendingProfile.grade + '학년 · ' + pendingProfile.classroom + ' 참가 신청을 보냈어요.'
+        : 'Google 계정으로 접속하고, 선생님의 반 참가 승인을 받으면 놀이를 시작할 수 있어요.'));
+      const next = node('button', pendingProfile ? '승인 확인' : 'Google 로그인', 'button primary');
+      next.type = 'button';
+      next.onclick = pendingProfile ? () => restoreAccount().catch(error => notify($('global-status'), textError(error), true)) : handleLogin;
+      card.append(next);
+      $('view-content').replaceChildren(card);
+      return;
+    }
+    $('view-content').replaceChildren($('player-template').content.cloneNode(true));
+    const form = $('view-content').querySelector('form');
+    const submit = form.querySelector('button');
+    function showRooms() {
+      const grade = form.elements.grade.value;
+      const count = fillClassrooms(form.elements.classroom, grade, true);
+      $('player-class-help').textContent = grade && !count ? '아직 등록된 반이 없어요. 선생님께 반 등록을 부탁해 주세요.' : '';
+    }
+    form.elements.grade.onchange = showRooms;
+    showRooms();
+    form.onsubmit = async event => {
+      event.preventDefault();
+      const identity = Object.fromEntries(new FormData(form));
+      identity.name = identity.name.trim().normalize('NFC');
+      const room = classrooms.find(item => item.id === identity.classroom && item.grade === identity.grade);
+      if (!identity.name || /[\u0000-\u001f\u007f]/.test(identity.name) || !room || !Number(identity.number)) {
+        notify(form.querySelector('.notice'), '반과 닉네임을 적고, 번호는 1 이상으로 입력해 주세요.', true);
+        return;
+      }
+      submit.disabled = true;
+      try {
+        const profile = await rpc('student.enter', { classId: room.id, name: identity.name, number: identity.number });
+        if (!form.isConnected) return;
+        await openProfile(profile);
+        showHome();
+      } catch (error) {
+        if (form.isConnected) notify(form.querySelector('.notice'), textError(error), true);
+      } finally {
+        submit.disabled = false;
+      }
+    };
+  }
+
+  function freshTreasure() {
+    return { coins: 0, badges: [], owned: ['purple'], learned: [], ...boot.characterDefaults };
+  }
+
+  function fillClassrooms(select, grade, useId, selected = '') {
+    const rooms = classrooms.filter(room => room.grade === grade);
+    const placeholder = node('option', grade ? '반 선택' : '학년을 먼저 선택해 주세요');
+    placeholder.value = '';
+    select.replaceChildren(placeholder);
+    for (const room of rooms) {
+      const option = node('option', room.label);
+      option.value = useId ? room.id : room.label;
+      option.defaultSelected = option.value === selected;
+      select.append(option);
+    }
+    if (selected) select.value = selected;
+    return rooms.length;
+  }
+
+  function openCharacterConnection(profile) {
+    let saved;
+    const cacheKey = 'hanja-firebase:' + backend.current() + ':' + profile.classId + ':' + profile.generation;
+    try { saved = JSON.parse(sessionStorage.getItem(cacheKey)); } catch (_) {}
+    return {
+      cacheKey, generation: profile.generation, cached: saved?.cached || freshTreasure(),
+      device: saved?.device || crypto.randomUUID(), next: saved?.next || 1, pending: saved?.pending || []
+    };
+  }
+
+  async function openProfile(profile) {
+    pendingProfile = profile?.status === 'pending' ? profile : null;
+    if (!profile || pendingProfile) return;
+    const connection = openCharacterConnection(profile);
+    if (!await syncCharacterConnection(connection) || connection.reset) throw new Error('서버에서 캐릭터를 확인하지 못했어요.');
+    player = { ...profile, key: backend.current() };
+    cloud = connection;
+    treasure = connection.cached;
+    document.body.dataset.treasureTheme = treasure.theme;
+    $('cloud-status').hidden = false;
+    notify($('cloud-status'), '캐릭터를 불러왔어요.');
+    if (connection.pending.length) queueCloudSave(0);
+  }
+
+  async function restoreAccount() {
+    if (!backend.current()) { setSession(false); showHome(); return; }
+    const profile = await rpc('auth.profile');
+    setSession(profile.teacher);
+    await refreshClassrooms();
+    await openProfile(profile.student);
+    showHome();
+  }
+
+  function persistConnection(connection) {
+    try {
+      const { device, next, pending, cached } = connection;
+      sessionStorage.setItem(connection.cacheKey, JSON.stringify({ device, next, pending, cached }));
+    } catch (_) {}
+  }
+
+  function syncCharacterConnection(connection) {
+    if (!connection.flight) {
+      connection.flight = saveCharacterBatch(connection).finally(() => { connection.flight = null; });
+    }
+    return connection.flight;
+  }
+
+  async function saveCharacterBatch(connection) {
+    const changes = connection.pending.slice(0, 60);
+    try {
+      const reply = await rpc('character.sync', {
+        generation: connection.generation, device: connection.device, changes
+      });
+      if (reply.reset) {
+        connection.reset = true;
+        connection.pending = [];
+        try { sessionStorage.removeItem(connection.cacheKey); } catch (_) {}
+        if (cloud === connection) {
+          clearTimeout(connection.timer);
+          leaveCharacter();
+          notify($('global-status'), '반이 초기화됐어요. 다시 입장해 주세요.');
+          await refreshClassrooms();
+        }
+        return false;
+      }
+      connection.pending = connection.pending.filter(change => change.seq > reply.accepted);
+      if (!connection.pending.length) connection.cached = reply.state;
+      persistConnection(connection);
+      if (cloud === connection) {
+        treasure = connection.cached;
+        document.body.dataset.treasureTheme = treasure.theme;
+        const message = reply.rejected ? '다른 기기에서 사용한 포인트 때문에 일부 변경을 적용하지 못했어요.' : '캐릭터 저장 완료';
+        notify($('cloud-status'), message, Boolean(reply.rejected));
+        if (connection.pending.length) queueCloudSave(0);
+      }
+      return true;
+    } catch (_) {
+      if (cloud === connection) {
+        notify($('cloud-status'), '서버 저장 대기 중이에요. 연결되면 다시 시도해요.', true);
+        queueCloudSave(5000);
+      }
+      return false;
+    }
+  }
+
+  function queueCloudSave(delay = 400) {
+    const connection = cloud;
+    clearTimeout(connection.timer);
+    connection.timer = setTimeout(() => syncCharacterConnection(connection), delay);
+  }
+
+  async function refreshClassrooms() {
+    try {
+      const rooms = await rpc('classroom.list');
+      classrooms.splice(0, classrooms.length, ...rooms);
+    } catch (_) {}
+  }
+
+  function mount(template, title, description, audience, focus = true) {
+    viewVersion += 1;
+    cleanup();
+    cleanup = () => {};
+    $('back').hidden = audience === 'student';
+    $('tool-view').dataset.audience = audience;
+    $('game-start').hidden = true;
+    $('view-title').textContent = title;
+    $('view-description').textContent = description;
+    $('view-tag').textContent = tagNames[audience];
+    $('view-tag').className = 'tag ' + audience;
+    $('view-content').replaceChildren($(template + '-template').content.cloneNode(true));
+    if (focus) $('view-title').focus();
+  }
+
+  $('brand').onclick = () => showHome();
+  $('game-home').onclick = () => showHome();
+  function leaveCharacter() {
+    if (cloud?.pending.length) {
+      clearTimeout(cloud.timer);
+      syncCharacterConnection(cloud);
+    }
+    cloud = null;
+    $('cloud-status').hidden = true;
+    player = null;
+    treasure = null;
+    delete document.body.dataset.treasureTheme;
+    showHome();
+  }
+  $('change-player').onclick = leaveCharacter;
+  $('back').onclick = () => showHome();
+
+  async function handleLogin() {
+    const control = $('auth-button');
+    if (control.disabled) return;
+    control.disabled = true;
+    try {
+      await backend.login();
+      await restoreAccount();
+      notify($('global-status'), '');
+    } catch (error) {
+      notify($('global-status'), textError(error), true);
+    } finally {
+      control.disabled = false;
+    }
+  }
+
+  $('auth-button').onclick = async () => {
+    if (!backend.current()) { await handleLogin(); return; }
+    const connection = cloud;
+    try {
+      while (connection?.pending.length) {
+        if (!await syncCharacterConnection(connection)) throw new Error('캐릭터를 저장한 뒤 로그아웃해 주세요.');
+      }
+      await backend.logout();
+      if (connection) sessionStorage.removeItem(connection.cacheKey);
+      pendingProfile = null;
+      studentDrafts.clear();
+      syncUnloadWarning();
+      classrooms.length = 0;
+      setSession(false);
+      leaveCharacter();
+    } catch (error) {
+      notify($('global-status'), textError(error), true);
+    }
+  };
+
+  const activityButton = $('manage-cards');
+  activityButton.onclick = async () => {
+      if (!session) return;
+      const requestedView = ++viewVersion;
+      activityButton.disabled = true;
+      try {
+        const [rows, rooms] = await Promise.all([rpc('teacher.cards'), rpc('classroom.list')]);
+        if (viewVersion !== requestedView) return;
+        classrooms.splice(0, classrooms.length, ...rooms);
+        mount('manage', '학급·한자 관리', '학생이 고를 반을 등록하고 학년별 한자를 추가할 수 있어요.', 'teacher');
+        setupCardManagement(rows);
+        setupClassroomManagement();
+        setupClassroomCleanup();
+      } catch (error) {
+        if (viewVersion === requestedView) notify($('global-status'), textError(error), true);
+      } finally {
+        activityButton.disabled = false;
+      }
+    };
+  function setupStudent(draftKey, getResult, onReset) {
+    const slot = $('view-content').querySelector('[data-student-slot]');
+    slot.replaceChildren($('student-submission-template').content.cloneNode(true));
+    const form = slot.querySelector('form');
+    const status = form.querySelector('.notice');
+    const send = $('student-send');
+    const newButton = $('student-new');
+    const privacy = boot.privacy;
+    const submitLabel = '학습 결과 제출';
+    $('submission-summary').textContent = player.grade + '학년 · ' + player.classroom + ' · ' + player.name;
+    $('privacy-purpose').textContent = '한자 활동 참여와 학습 결과 확인';
+    for (const key of ['controller', 'retention', 'contact']) $('privacy-' + key).textContent = privacy[key] || '운영 전 확정';
+    function renderDraft() {
+      const draft = studentDrafts.get(draftKey);
+      send.disabled = draft ? draft.busy || draft.complete : !privacy.enabled;
+      send.textContent = draft && draft.complete ? '제출 완료' : draft && !draft.busy ? '같은 제출 다시 확인' : submitLabel;
+      newButton.hidden = !draft || draft.busy;
+      notify(status, draft ? draft.message : privacy.enabled ? '' : '현재 접수 중이 아닙니다. 수업 담당 선생님에게 물어봐 주세요.', Boolean(draft && draft.error));
+    }
+    studentViews.set(draftKey, renderDraft);
+    renderDraft();
+    newButton.onclick = () => {
+      const draft = studentDrafts.get(draftKey);
+      if (!draft || draft.busy) return;
+      if (!draft.complete && !window.confirm('이전 제출이 저장됐을 수 있습니다. 새 제출을 시작할까요?')) return;
+      if (draft.complete) form.reset();
+      studentDrafts.delete(draftKey);
+      syncUnloadWarning();
+      renderDraft();
+      if (onReset && !getResult()) {
+        onReset();
+      } else {
+        send.focus();
+      }
+    };
+    form.onsubmit = async (event) => {
+      event.preventDefault();
+      let draft = studentDrafts.get(draftKey);
+      if (draft ? draft.busy || draft.complete : !privacy.enabled) return;
+      if (!draft) {
+        const result = getResult ? getResult() : {};
+        if (!result) {
+          notify(status, '퀴즈를 마친 뒤 결과를 제출할 수 있어요.', true);
+          return;
+        }
+        draft = {payload: {...result, submissionId: crypto.randomUUID()}};
+        studentDrafts.set(draftKey, draft);
+        syncUnloadWarning();
+      }
+      draft.busy = true;
+      draft.error = false;
+      draft.message = '제출 저장 여부를 확인하고 있습니다.';
+      renderDraft();
+      try {
+        const receipt = await rpc('student.submit', draft.payload);
+        if (!receipt || receipt.submissionId !== draft.payload.submissionId) throw new Error('접수 번호를 확인하지 못했습니다.');
+        draft.complete = true;
+        draft.payload = null;
+        syncUnloadWarning();
+        draft.message = '제출이 접수되었습니다. 접수 ID ' + receipt.submissionId;
+      } catch (error) {
+        draft.error = true;
+        draft.message = '저장을 확인하지 못했습니다. ' + textError(error) + ' 새로고침하거나 탭을 닫기 전에 같은 제출을 다시 확인해 주세요.';
+      } finally {
+        draft.busy = false;
+        const activeView = studentViews.get(draftKey);
+        if (activeView) activeView();
+        if (form.isConnected) (draft.complete ? newButton : send).focus();
+      }
+    };
+    cleanup = () => { studentViews.delete(draftKey); form.reset(); };
+    return slot;
+  }
+
+  function setupHanja() {
+    const draftKey = player.key;
+    const catalog = boot.hanja;
+    const progress = $('hanja-progress');
+    const heading = $('hanja-stage');
+    const content = $('hanja-content');
+    const feedback = $('hanja-feedback');
+    const actions = $('hanja-actions');
+    let learningGrade;
+    let mission;
+    let missionVersion;
+    let missionId;
+    const correctedAnswers = new Map();
+    let rewardClaimed;
+    let lastGame;
+    const studied = new Set();
+    let result = null;
+    let misses = [];
+    let mastered = false;
+    const slot = setupStudent(draftKey, () => result, () => chooseGrade());
+
+    function button(label, onClick, primary = false) {
+      const control = node('button', label, 'button ' + (primary ? 'primary' : 'secondary'));
+      control.type = 'button';
+      control.onclick = () => onClick();
+      return control;
+    }
+
+    function stage(title, progressText, focus = true) {
+      $('tool-view').dataset.questStage = 'play';
+      $('game-start').hidden = true;
+      heading.textContent = title;
+      progress.textContent = progressText;
+      content.replaceChildren();
+      actions.replaceChildren();
+      notify(feedback, '');
+      if (focus) heading.focus();
+    }
+
+    function openSubmission() {
+      slot.hidden = false;
+      const target = slot.querySelector('input:not(:disabled), button:not(:disabled):not([hidden])');
+      if (target) target.focus();
+      else {
+        const form = slot.querySelector('form');
+        form.tabIndex = -1;
+        form.focus();
+      }
+    }
+
+    function chooseGrade(focus = true) {
+      result = null;
+      misses = [];
+      mastered = false;
+      slot.hidden = true;
+      const draft = studentDrafts.get(draftKey);
+      if (!draft) slot.querySelector('form').reset();
+      stage('몇 학년으로 놀까요?', '학년 선택', focus);
+      $('tool-view').dataset.questStage = 'map';
+      const grades = node('div', '', 'island-grid');
+      grades.setAttribute('role', 'group');
+      grades.setAttribute('aria-label', '연습 학년');
+      const glyphs = ['山', '手', '東', '學', '光', '文'];
+      for (const grade of catalog.grades) {
+        const island = button('', () => {
+          learningGrade = grade;
+          prepareMission();
+        });
+        island.classList.add('island-button');
+        island.dataset.grade = grade;
+        island.setAttribute('aria-label', grade + '학년');
+        const art = $('island-art-template').content.cloneNode(true);
+        art.querySelector('text').textContent = glyphs[grade - 1];
+        island.append(art, node('strong', grade + '학년', 'island-name'));
+        grades.append(island);
+      }
+      content.append(grades);
+      if (draft) actions.append(button(draft.complete ? '접수 결과 보기' : '이전 제출 다시 확인', openSubmission));
+    }
+
+    async function prepareMission() {
+      slot.hidden = true;
+      stage('한자 20자를 뽑는 중!', learningGrade + '학년');
+      const loading = node('p', '별이가 이번 판 카드를 섞고 있어요.');
+      content.append(loading);
+      actions.append(button('학년 바꾸기', chooseGrade));
+      try {
+        const connection = cloud;
+        while (connection.pending.length) {
+          if (!await syncCharacterConnection(connection) || connection.reset) throw new Error('앞선 놀이의 저장을 먼저 확인해 주세요.');
+        }
+        if (!loading.isConnected) return;
+        const draw = await rpc('hanja.mission', { grade: learningGrade });
+        if (!loading.isConnected) return;
+        mission = draw.cards;
+        missionVersion = draw.version;
+        missionId = draw.missionId;
+        rewardClaimed = false;
+        studied.clear();
+        result = null;
+        showMission();
+      } catch (error) {
+        if (!loading.isConnected) return;
+        notify(feedback, textError(error), true);
+        actions.prepend(button('다시 뽑기', prepareMission, true));
+      }
+    }
+
+    function showMission() {
+      stage('이번 판 보물 목록', learningGrade + '학년 · 연습방');
+      content.append(node('p', '이번 판에 나올 글자예요. 카드마다 뜻과 음을 확인하면 랜덤 놀이를 뽑을 수 있어요.'));
+      const list = node('div', '', 'mission-grid');
+      for (const [index, card] of mission.entries()) {
+        const learned = studied.has(card.id);
+        const tile = button('', () => showCard(index));
+        tile.classList.add('mission-tile');
+        tile.append(node('strong', card.character), node('span', learned ? card.meaning + ' · ' + card.reading : '카드 열기'));
+        list.append(tile);
+      }
+      content.append(list);
+      const play = button('랜덤 놀이 뽑기', drawGame, true);
+      play.disabled = studied.size !== mission.length;
+      content.append(node('p', '연습한 카드 ' + studied.size + ' / ' + mission.length, 'quest-counter'));
+      actions.append(play, button('꾸미기 상점', () => showShop(showMission)), button('다른 학년 고르기', chooseGrade));
+    }
+
+    function showCard(index) {
+      const card = mission[index];
+      stage('보물 카드', '카드 탐험 · ' + learningGrade + '학년 · ' + (index + 1) + ' / ' + mission.length + '장');
+      const glyph = node('p', card.character, 'hanja-glyph');
+      glyph.lang = 'ko-Hani';
+      const details = node('div', '', 'hanja-details stack');
+      details.id = 'hanja-card-details';
+      details.hidden = true;
+      details.append(node('strong', card.meaning + ' · ' + card.reading));
+      if (card.example) details.append(node('p', card.example));
+      const reveal = button('뜻·음 보기', () => {
+        details.hidden = !details.hidden;
+        if (!details.hidden) {
+          const firstReview = !studied.has(card.id);
+          studied.add(card.id);
+          if (!treasure.learned.includes(card.id)) {
+            treasure.learned.push(card.id);
+            treasure.coins += 1;
+            details.append(node('p', '처음 익힌 한자 · 포인트 +1', 'hanja-badge'));
+          }
+          if (firstReview) saveTreasure({ type: 'learn', id: card.id, missionId });
+        }
+        reveal.setAttribute('aria-expanded', String(!details.hidden));
+        reveal.textContent = details.hidden ? '뜻·음 보기' : '뜻·음 가리기';
+        notify(feedback, details.hidden ? '' : card.meaning + ', 소리 ' + card.reading);
+      });
+      reveal.setAttribute('aria-expanded', 'false');
+      reveal.setAttribute('aria-controls', details.id);
+      content.append(glyph);
+      if (card.id.startsWith('extra-')) content.append(node('p', '선생님이 추가한 한자', 'hanja-badge'));
+      if (card.clue) content.append(node('p', card.clue, 'hanja-clue'));
+      content.append(reveal, details);
+      const previous = button('이전 카드', () => showCard(index - 1));
+      previous.disabled = index === 0;
+      const next = button('다음 카드', () => showCard(index + 1));
+      next.disabled = index === mission.length - 1;
+      actions.append(previous, next, button('보물 목록으로', showMission, true));
+    }
+
+    function shuffle(items) {
+      const list = items.slice();
+      for (let i = list.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [list[i], list[j]] = [list[j], list[i]];
+      }
+      return list;
+    }
+
+    function drawGame() {
+      const games = [
+        { title: '짝꿍 카드', symbol: '▧', hint: '카드를 뒤집어 한자와 뜻·음의 짝을 찾아요.', start: startMatching },
+        { title: '두더지 잡기', symbol: '◎', hint: '뜻과 음을 보고 맞는 한자를 든 두더지를 잡아요.', start: startMoles },
+        { title: '보물 퀴즈', symbol: '✦', hint: '배운 한자로 문제를 풀고 배지를 모아요.', start: startQuiz },
+        { title: '별똥별 슈팅', symbol: '★', hint: '맞는 한자를 달고 지나가는 별을 눌러 잡아요.', start: () => startArcade('stars') },
+        { title: '한자 점프', symbol: '▲', hint: '발판을 고른 뒤 점프해서 보물을 건너요.', start: () => startArcade('jump') }
+      ];
+      const selected = shuffle(games.filter(game => game.title !== lastGame))[0];
+      lastGame = selected.title;
+      stage(selected.title + ' 당첨!', '랜덤 놀이');
+      const ticket = node('div', '', 'game-ticket');
+      const symbol = node('span', selected.symbol, 'game-symbol');
+      symbol.setAttribute('aria-hidden', 'true');
+      ticket.append(symbol, node('strong', selected.title), node('p', selected.hint));
+      content.append(ticket);
+      actions.append(button('놀이 시작', selected.start, true), button('보물 목록으로', showMission));
+    }
+
+    function saveTreasure(change) {
+      document.body.dataset.treasureTheme = treasure.theme;
+      cloud.cached = treasure;
+      cloud.pending.push({ ...change, seq: cloud.next++ });
+      persistConnection(cloud);
+      notify($('cloud-status'), '캐릭터 저장 중');
+      queueCloudSave();
+    }
+
+    function rewardBanner(badge, answers) {
+      const earned = !rewardClaimed;
+      if (earned) {
+        rewardClaimed = true;
+        treasure.coins += 5;
+      }
+      const newBadge = !treasure.badges.includes(badge);
+      if (newBadge) treasure.badges.push(badge);
+      if (earned || newBadge) saveTreasure({ type: 'badge', badge, earned, missionId, ...(answers ? { answers } : {}) });
+      return node('p', (earned ? '포인트 +5 · ' : '') + badge, 'hanja-badge quest-reward');
+    }
+
+    function avatarPortrait(outfit, badges) {
+      const portrait = node('div', '', 'character-portrait');
+      for (const slot of Object.keys(boot.characterDefaults)) {
+        portrait.dataset[slot] = outfit[slot] || boot.characterDefaults[slot];
+      }
+      const drawing = $('human-avatar-template').content.cloneNode(true);
+      const avatar = drawing.querySelector('svg');
+      for (const [index, badge] of badges.entries()) {
+        const pin = document.createElementNS(avatar.namespaceURI, 'text');
+        pin.setAttribute('x', String(88 + index * 12));
+        pin.setAttribute('y', '146');
+        pin.setAttribute('class', 'character-pin');
+        pin.textContent = badge === '한자 달인 배지' ? '★' : '✦';
+        avatar.append(pin);
+      }
+      portrait.append(drawing);
+      return portrait;
+    }
+
+    function characterCard() {
+      const card = node('section', '', 'character-card');
+      const info = node('div', '', 'character-info');
+      info.append(node('h3', player.name + '의 캐릭터'), node('p', player.grade + '학년 · ' + treasure.coins + ' 포인트'));
+      info.append(node('p', treasure.badges.length ? treasure.badges.join(' · ') : '놀이를 끝내면 캐릭터에 배지가 달려요.'));
+      card.append(avatarPortrait(treasure, treasure.badges), info);
+      return card;
+    }
+
+    async function showClassmates() {
+      stage('우리 반 아바타', player.grade + '학년 · ' + player.classroom);
+      const grid = node('div', '', 'class-avatar-grid');
+      content.append(grid);
+      actions.append(button('새로 불러오기', showClassmates), button('돌아가기', showHome, true));
+      notify(feedback, '우리 반 친구들을 불러오는 중이에요.');
+      try {
+        const connection = cloud;
+        if (connection.pending.length && !connection.flight) await syncCharacterConnection(connection);
+        const friends = await rpc('classroom.avatars');
+        if (!grid.isConnected) return;
+        for (const friend of friends) {
+          const card = node('article', '', 'class-avatar-card');
+          card.append(avatarPortrait(friend.outfit, friend.badges), node('h3', friend.nickname));
+          if (friend.badges.length) card.append(node('p', friend.badges.join(' · ')));
+          grid.append(card);
+        }
+        notify(feedback, friends.length ? '' : '아직 입장한 친구가 없어요.');
+      } catch (error) {
+        if (grid.isConnected) notify(feedback, textError(error), true);
+      }
+    }
+
+    function showShop(back) {
+      stage('내 캐릭터 꾸미기', treasure.coins + ' 포인트 · 배지 ' + treasure.badges.length + '종');
+      content.append(characterCard(), node('p', '새 한자를 처음 익히면 1포인트, 놀이를 끝내면 한 판에 5포인트를 얻어요.'));
+      const categories = { hat: '모자', hair: '머리', skin: '피부', top: '상의', bottom: '하의', scarf: '목도리', glasses: '안경', shoes: '신발' };
+      for (const [slot, category] of Object.entries(categories)) {
+        const wardrobe = node('div', '', 'theme-grid');
+        content.append(node('h3', category), wardrobe);
+        for (const [itemKey, item] of Object.entries(boot.characterItems).filter(([, item]) => item.slot === slot)) {
+          const owned = treasure.owned.includes(itemKey);
+          const equipped = treasure[slot] === item.value;
+          const option = button(item.label + ' · ' + (equipped ? '기본으로' : owned || !item.cost ? '착용' : item.cost + '포인트'), () => {
+            if (!owned) {
+              treasure.coins -= item.cost;
+              treasure.owned.push(itemKey);
+            }
+            treasure[slot] = equipped ? boot.characterDefaults[slot] : item.value;
+            saveTreasure({ type: 'equip', item: itemKey, remove: equipped });
+            showShop(back);
+            notify(feedback, equipped ? '기본 모습으로 바꿨어요.' : item.label + ' 적용 완료');
+          });
+          option.classList.add('theme-option');
+          option.style.setProperty('--item-color', item.color);
+          option.disabled = !owned && treasure.coins < item.cost;
+          wardrobe.append(option);
+        }
+      }
+      content.append(node('h3', '게임 화면 색'));
+      const themes = [
+        { id: 'purple', label: '보라 마법' },
+        { id: 'mint', label: '민트 별빛', cost: 5 },
+        { id: 'pink', label: '딸기 축제', cost: 10 },
+        { id: 'gold', label: '금빛 달인', badge: '한자 달인 배지' }
+      ];
+      const grid = node('div', '', 'theme-grid');
+      for (const theme of themes) {
+        const owned = treasure.owned.includes(theme.id);
+        const available = owned || (theme.badge ? treasure.badges.includes(theme.badge) : treasure.coins >= theme.cost);
+        const option = button(theme.label + ' · ' + (owned ? (treasure.theme === theme.id ? '사용 중' : '적용') : (theme.badge || theme.cost + '포인트')), () => {
+          if (!owned) {
+            treasure.coins -= theme.cost || 0;
+            treasure.owned.push(theme.id);
+          }
+          treasure.theme = theme.id;
+          saveTreasure({ type: 'equip', item: theme.id });
+          showShop(back);
+          notify(feedback, theme.label + '을 적용했어요.');
+        });
+        option.classList.add('theme-option');
+        option.dataset.theme = theme.id;
+        option.disabled = !available || treasure.theme === theme.id;
+        grid.append(option);
+      }
+      content.append(grid);
+      actions.append(button('돌아가기', back, true));
+    }
+
+    function showPlayWin(title, detail, replay) {
+      stage(title, '놀이 완료 · ' + learningGrade + '학년');
+      content.append(node('p', detail), rewardBanner('놀이 완주 배지'), characterCard());
+      actions.append(button('새 판 시작', prepareMission, true), button('꾸미기 상점', () => showShop(() => showPlayWin(title, detail, replay))), button('한 번 더', replay), button('결과 제출용 퀴즈', startQuiz));
+    }
+
+    function startMatching(start = 0) {
+      stage('뒤집어서 짝을 찾아요!', '보물 게임 · ' + learningGrade + '학년');
+      const group = mission.slice(start, start + 10);
+      const instruction = node('p', '두 카드를 뒤집어 한자와 뜻·음이 짝을 이루는지 확인해요.');
+      const board = node('div', '', 'match-board');
+      const counter = node('p', '찾은 보물 ' + start + ' / ' + mission.length, 'quest-counter');
+      const chest = node('div', '', 'match-chest');
+      chest.setAttribute('aria-hidden', 'true');
+      const tiles = shuffle(group.flatMap(card => [
+        {kind: '한자', text: card.character, pair: card.meaning + ' · ' + card.reading},
+        {kind: '뜻', text: card.meaning + ' · ' + card.reading, pair: card.meaning + ' · ' + card.reading}
+      ]));
+      let first = null;
+      let busy = false;
+      let matched = 0;
+      function cover(tile) {
+        tile.control.textContent = '?';
+        tile.control.dataset.open = 'false';
+        tile.control.setAttribute('aria-label', '카드 ' + tile.number + ' 뒤집기');
+      }
+      for (const [index, tile] of tiles.entries()) {
+        tile.number = index + 1;
+        tile.control = button('?', () => {
+          if (busy || first === tile) return;
+          tile.control.textContent = tile.text;
+          tile.control.dataset.open = 'true';
+          tile.control.setAttribute('aria-label', tile.kind + ' ' + tile.text);
+          notify(feedback, tile.kind + ' 카드 · ' + tile.text);
+          if (!first) { first = tile; return; }
+          const previous = first;
+          first = null;
+          if (previous.kind !== tile.kind && previous.pair === tile.pair) {
+            for (const match of [previous, tile]) {
+              match.control.disabled = true;
+              match.control.dataset.matched = 'true';
+            }
+            matched += 1;
+            counter.textContent = '찾은 보물 ' + (start + matched) + ' / ' + mission.length;
+            chest.classList.remove('chest-pop');
+            void chest.offsetWidth;
+            chest.classList.add('chest-pop');
+            const complete = start + matched === mission.length;
+            notify(feedback, complete ? '상자가 열렸어요! 모든 짝을 찾았어요.' : '짝을 찾았어요!');
+            if (matched === group.length) {
+              chest.dataset.complete = 'true';
+              const finish = complete
+                ? button('보물 받기', () => showPlayWin('모든 짝을 찾았어요!', mission.length + '쌍의 보물을 모았어요.', startMatching), true)
+                : button('다음 10쌍', () => startMatching(start + 10), true);
+              actions.append(finish);
+              finish.focus();
+            } else {
+              board.querySelector('button:not(:disabled)').focus();
+            }
+            return;
+          }
+          busy = true;
+          notify(feedback, '다른 짝이에요. 카드 위치를 기억해 봐요.');
+          setTimeout(() => {
+            if (!board.isConnected) return;
+            cover(previous);
+            cover(tile);
+            busy = false;
+          }, 1000);
+        });
+        tile.control.classList.add('match-card');
+        cover(tile);
+        board.append(tile.control);
+      }
+      content.append(instruction, chest, counter, board);
+      actions.append(button('보물 목록으로', showMission));
+    }
+
+    function startArcade(mode) {
+      const stars = mode === 'stars';
+      const title = stars ? '별똥별 슈팅' : '한자 점프';
+      const targets = shuffle(mission);
+      function round(index) {
+        const target = targets[index];
+        stage(title, index + 1 + ' / ' + targets.length);
+        content.append(node('strong', target.meaning + ' · ' + target.reading, 'mole-clue'));
+        const arena = node('div', '', 'arcade-arena ' + (stars ? 'star-arena' : 'jump-arena'));
+        const options = shuffle([target, ...shuffle(mission.filter(card => card.id !== target.id)).slice(0, 2)]);
+        let selected = -1;
+        let locked = false;
+        const launch = button('점프!', () => hit(selected), true);
+        launch.disabled = true;
+        const pads = options.map((card, index) => {
+          const pad = button(card.character, () => {
+            if (stars) { hit(index); return; }
+            selected = index;
+            for (const [position, choice] of pads.entries()) choice.setAttribute('aria-pressed', String(position === index));
+            launch.disabled = false;
+          });
+          pad.classList.add('arcade-target');
+          if (!stars) pad.setAttribute('aria-pressed', 'false');
+          arena.append(pad);
+          return pad;
+        });
+        function hit(index) {
+          if (locked || index < 0) return;
+          const correct = options[index].id === target.id;
+          if (!correct) {
+            notify(feedback, '이 글자는 ' + options[index].meaning + ' · ' + options[index].reading + '이에요.', true);
+            return;
+          }
+          locked = true;
+          pads[index].dataset.hit = 'true';
+          for (const pad of pads) pad.disabled = true;
+          launch.disabled = true;
+          notify(feedback, stars ? '별을 잡았어요!' : '착지 성공!');
+          const done = indexInGame + 1 === targets.length;
+          const next = button(done ? '보물 받기' : '다음', () => {
+            if (done) showPlayWin(title + ' 성공!', targets.length + '개의 한자 보물을 모았어요.', () => startArcade(mode));
+            else round(indexInGame + 1);
+          }, true);
+          actions.prepend(next);
+          next.focus();
+        }
+        const indexInGame = index;
+        content.append(arena);
+        if (!stars) actions.append(launch);
+        actions.append(button('보물 목록으로', showMission));
+      }
+      round(0);
+    }
+
+    function startMoles() {
+      const targets = shuffle(mission);
+      function round(index) {
+        const target = targets[index];
+        stage('어떤 두더지를 잡을까요?', '두더지 잡기 · ' + (index + 1) + ' / ' + targets.length);
+        content.append(node('strong', target.meaning + ' · ' + target.reading, 'mole-clue'));
+        const board = node('div', '', 'mole-board');
+        const decoys = shuffle(mission.filter(card => card.id !== target.id)).slice(0, 2);
+        let locked = false;
+        for (const card of shuffle([target, ...decoys, null, null, null])) {
+          const hole = node('div', '', 'mole-hole');
+          if (card) {
+            const mole = button(card.character, () => {
+              if (locked) return;
+              if (card.id !== target.id) {
+                mole.disabled = true;
+                notify(feedback, '이 두더지는 ' + card.meaning + ' · ' + card.reading + '이에요. 다시 골라 봐요.', true);
+                board.querySelector('button:not(:disabled)').focus();
+                return;
+              }
+              locked = true;
+              mole.dataset.caught = 'true';
+              for (const control of board.querySelectorAll('button')) control.disabled = true;
+              notify(feedback, '잡았다! ' + target.character + ' · ' + target.meaning + ' · ' + target.reading);
+              const done = index + 1 === targets.length;
+              const next = button(done ? '보물 받기' : '다음 두더지', () => {
+                if (done) showPlayWin('두더지를 모두 찾았어요!', targets.length + '마리의 한자 두더지를 잡았어요.', startMoles);
+                else round(index + 1);
+              }, true);
+              actions.prepend(next);
+              next.focus();
+            });
+            mole.classList.add('mole');
+            mole.setAttribute('aria-label', card.character + ' 두더지 잡기');
+            hole.append(mole);
+          }
+          board.append(hole);
+        }
+        content.append(board);
+        actions.append(button('보물 목록으로', showMission));
+      }
+      round(0);
+    }
+
+    function startQuiz() {
+      const questions = shuffle(mission);
+      correctedAnswers.clear();
+      const answers = [];
+      if (studentDrafts.get(draftKey)?.complete) {
+        studentDrafts.delete(draftKey);
+        studentViews.get(draftKey)();
+      }
+      result = null;
+      misses = [];
+      mastered = false;
+      slot.hidden = true;
+      showQuestion(questions, 0, false, (card, option) => {
+        answers.push({questionId: card.id, optionId: option.id});
+        if (option.id !== card.correctOptionId) misses.push(card);
+      }, () => {
+        result = {version: missionVersion, learningGrade, missionId, answers};
+        for (const answer of answers) correctedAnswers.set(answer.questionId, answer);
+        showResults();
+      });
+    }
+
+    function showQuestion(questions, index, reviewing, recordAnswer, finish) {
+      const card = questions[index];
+      const label = reviewing ? '오답 재도전' : '보물 퀴즈';
+      stage(card.prompt, label + ' · ' + learningGrade + '학년 · ' + (index + 1) + ' / ' + questions.length);
+      const meter = node('progress', '', 'quest-meter');
+      meter.max = questions.length;
+      meter.value = index + 1;
+      meter.setAttribute('aria-label', '퀴즈 진행');
+      content.append(meter);
+      const choices = node('div', '', 'hanja-choices');
+      choices.setAttribute('role', 'group');
+      choices.setAttribute('aria-label', '답 고르기');
+      const next = button(index + 1 === questions.length ? '결과 보기' : '다음 문제', () => {
+        if (index + 1 === questions.length) finish();
+        else showQuestion(questions, index + 1, reviewing, recordAnswer, finish);
+      }, true);
+      next.hidden = true;
+      const options = shuffle(card.options);
+      for (const option of options) {
+        const choice = button(option.label, () => {
+          recordAnswer(card, option);
+          const correct = option.id === card.correctOptionId;
+          const answer = card.options.find(entry => entry.id === card.correctOptionId);
+          for (const control of choices.querySelectorAll('button')) control.disabled = true;
+          choice.classList.add(correct ? 'hanja-correct' : 'hanja-incorrect');
+          notify(feedback, (correct ? '정답이에요! ' : '정답은 ‘' + answer.label + '’이에요. ') + card.character + '은(는) ‘' + card.meaning + '’이라는 뜻이고 ‘' + card.reading + '’이라고 읽어요.', !correct);
+          next.hidden = false;
+          next.focus();
+        });
+        choices.append(choice);
+      }
+      content.append(choices);
+      actions.append(next);
+    }
+
+    function showResults() {
+      slot.hidden = true;
+      stage('퀴즈 완주!', learningGrade + '학년 · 탐험 결과');
+      const correct = result.answers.filter(answer => mission.find(card => card.id === answer.questionId).correctOptionId === answer.optionId).length;
+      content.append(node('p', '첫 퀴즈에서 ' + result.answers.length + '문제 중 ' + correct + '문제를 맞혔어요.'));
+      const reward = rewardBanner(mastered || !misses.length ? '한자 달인 배지' : '한자 탐험 완주 배지', [...correctedAnswers.values()]);
+      content.append(reward, characterCard());
+      if (misses.length) actions.append(button('오답 다시 풀기', () => {
+        const review = misses;
+        misses = [];
+        showQuestion(review, 0, true, (card, option) => {
+          if (option.id !== card.correctOptionId) misses.push(card);
+          else correctedAnswers.set(card.id, {questionId: card.id, optionId: option.id});
+        }, () => {
+          mastered = misses.length === 0;
+          showResults();
+        });
+      }, true));
+      const draft = studentDrafts.get(draftKey);
+      const submissionLabel = draft?.complete ? '접수 결과 보기' : draft?.payload ? '이전 제출 다시 확인' : '결과 제출하기';
+      actions.append(button(submissionLabel, openSubmission, !misses.length), button('새 판 시작', prepareMission), button('꾸미기 상점', () => showShop(showResults)), button('다른 학년 고르기', chooseGrade));
+    }
+
+    if (!catalog || !catalog.grades) {
+      stage('한자 카드를 준비 중이에요.', '', false);
+      return;
+    }
+    stage('별이의 보물 상자', '게임 방법', false);
+    $('tool-view').dataset.questStage = 'intro';
+    const start = $('game-start');
+    start.hidden = false;
+    start.onclick = () => chooseGrade();
+    const steps = node('ol', '', 'intro-steps');
+    for (const [title, detail] of [['학년 고르기', '1~6학년 중 원하는 학년을 골라요.'], ['한자 연습', '이번 판에 나온 한자 20자의 뜻과 음을 알아봐요.'], ['랜덤 놀이', '다섯 가지 놀이 중 하나를 뽑아 보물을 모아요.']]) {
+      const step = node('li');
+      step.append(node('strong', title), node('span', detail));
+      steps.append(step);
+    }
+    content.append(characterCard(), steps);
+    actions.append(button('캐릭터 꾸미기', () => showShop(showHome)), button('우리 반 아바타 보기', showClassmates));
+    if (studentDrafts.get(draftKey)) actions.append(button('이전 제출 확인', openSubmission));
+  }
+
+  function setupCardManagement(rows) {
+    const form = $('card-form');
+    const status = form.querySelector('.notice');
+    const submit = form.querySelector('[type="submit"]');
+    const list = $('added-cards');
+    const gradeFilter = $('catalog-grade');
+    function render() {
+      const cards = rows[gradeFilter.value].cards;
+      list.replaceChildren(...cards.map(card =>
+        node('li', card.character + ' · ' + card.meaning + ' · ' + card.reading + (card.id.startsWith('extra-') ? ' · 교사 추가' : ''))
+      ));
+      $('catalog-count').textContent = gradeFilter.value + '학년 · ' + cards.length + '자';
+    }
+    gradeFilter.onchange = render;
+    render();
+    form.onsubmit = async event => {
+      event.preventDefault();
+      submit.disabled = true;
+      try {
+        const card = await rpc('teacher.addCard', Object.fromEntries(new FormData(form)));
+        if (!form.isConnected) return;
+        rows[card.grade].cards.push(card);
+        gradeFilter.value = String(card.grade);
+        const grade = form.elements.grade.value;
+        form.reset();
+        form.elements.grade.value = grade;
+        render();
+        notify(status, grade + '학년 목록에 ' + card.character + '을(를) 추가했습니다.');
+        form.elements.character.focus();
+      } catch (error) {
+        if (form.isConnected) notify(status, textError(error), true);
+      } finally {
+        submit.disabled = false;
+      }
+    };
+  }
+
+  function setupClassroomManagement() {
+    const form = $('classroom-form');
+    const status = form.querySelector('.notice');
+    const submit = form.querySelector('button');
+    const render = () => {
+      $('registered-classrooms').replaceChildren(...classrooms.map(room => node('li', room.grade + '학년 · ' + room.label)));
+    };
+    render();
+    form.onsubmit = async event => {
+      event.preventDefault();
+      submit.disabled = true;
+      try {
+        const room = await rpc('classroom.register', Object.fromEntries(new FormData(form)));
+        classrooms.push(room);
+        if (!form.isConnected) return;
+        form.elements.label.value = '';
+        render();
+        $('cleanup-scope').dispatchEvent(new Event('classrooms-changed'));
+        notify(status, room.grade + '학년 · ' + room.label + ' 등록 완료');
+      } catch (error) {
+        if (form.isConnected) notify(status, textError(error), true);
+      } finally {
+        submit.disabled = false;
+      }
+    };
+  }
+
+  function setupClassroomCleanup() {
+    const scope = $('cleanup-scope');
+    const form = $('cleanup-form');
+    const status = $('cleanup-status');
+    const submit = form.querySelector('button');
+    const list = $('cleanup-students');
+    let summary;
+    let revision = 0;
+    function updateOptions() {
+      const selected = scope.value;
+      const first = node('option', '반을 선택해 주세요');
+      first.value = '';
+      scope.replaceChildren(first, ...classrooms.map(room => {
+        const option = node('option', room.grade + '학년 · ' + room.label);
+        option.value = room.id;
+        return option;
+      }));
+      scope.value = [...scope.options].some(option => option.value === selected) ? selected : '';
+    }
+    async function load(message = '') {
+      const request = ++revision;
+      const selected = scope.value;
+      summary = null;
+      form.hidden = true;
+      form.reset();
+      list.replaceChildren();
+      if (!selected) { notify(status, '기록을 정리할 반을 선택해 주세요.'); return; }
+      notify(status, '기록을 불러오는 중이에요.');
+      try {
+        const reply = await rpc('classroom.characters', { scope: selected });
+        if (!scope.isConnected || request !== revision) return;
+        summary = reply;
+        list.replaceChildren(...reply.students.map(student => {
+          const row = node('li', student.number + '번 · ' + student.nickname + ' · ' + (student.status === 'pending' ? '승인 대기' : student.points + '포인트 · 배지 ' + student.badges + '개'));
+          if (student.status === 'pending' && !reply.resetting) {
+            for (const [label, state] of [['승인', 'approved'], ['거절', 'rejected']]) {
+              const action = node('button', label, 'button secondary');
+              action.type = 'button';
+              action.onclick = async () => {
+                for (const control of row.querySelectorAll('button')) control.disabled = true;
+                try {
+                  await rpc('classroom.membership', { studentId: student.id, status: state });
+                  if (row.isConnected) await load('참가 신청을 처리했습니다.');
+                } catch (error) {
+                  if (row.isConnected) { notify(status, textError(error), true); for (const control of row.querySelectorAll('button')) control.disabled = false; }
+                }
+              };
+              row.append(action);
+            }
+          }
+          return row;
+        }));
+        $('cleanup-confirmation-label').textContent = '확인하려면 다음을 입력해 주세요. ' + reply.label;
+        form.hidden = !(reply.count || reply.resultCount || reply.resetting);
+        notify(status, message || reply.label + '에 학생 ' + reply.count + '명과 제출 결과 ' + reply.resultCount + '건이 있습니다.');
+      } catch (error) {
+        if (scope.isConnected && request === revision) notify(status, textError(error), true);
+      }
+    }
+    updateOptions();
+    scope.onchange = () => load();
+    scope.addEventListener('classrooms-changed', updateOptions);
+    form.onsubmit = async event => {
+      event.preventDefault();
+      if (!summary || submit.disabled) return;
+      const confirmation = form.elements.confirmation.value.trim();
+      if (confirmation !== summary.label) {
+        notify(status, '표시된 이름을 그대로 입력해 주세요.', true);
+        return;
+      }
+      submit.disabled = true;
+      scope.disabled = true;
+      try {
+        const result = await rpc('classroom.reset', { scope: scope.value, confirmation, generation: summary.generation });
+        await refreshClassrooms();
+        if (scope.isConnected) await load('학생 ' + result.removed + '명과 제출 결과 ' + result.removedResults + '건을 삭제했습니다.');
+      } catch (error) {
+        if (scope.isConnected) notify(status, textError(error), true);
+      } finally {
+        submit.disabled = false;
+        scope.disabled = false;
+      }
+    };
+    load();
+  }
+
+  document.querySelector('.quest-art').replaceChildren($('human-avatar-template').content.cloneNode(true));
+  setSession(false);
+  showHome(false);
+  if (backend.current()) restoreAccount().catch(error => notify($('global-status'), textError(error), true));
+})();
+</script>

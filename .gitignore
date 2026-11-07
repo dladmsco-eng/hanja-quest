@@ -1,0 +1,16 @@
+dist/
+node_modules/
+.firebase/
+.firebaserc
+.env*
+!.env.example
+*.log
+*.pem
+*.p12
+*.key
+*service-account*.json
+*serviceAccount*.json
+*.xlsx
+*.csv
+.clasp.json
+.clasprc.json
